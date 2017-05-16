@@ -105,6 +105,13 @@ typedef struct Mpi2ManufacturingPage10_t {
     U32 Reserved5[18];
 } Mpi2ManufacturingPage10_t;
 
+typedef struct MPT3SASTopologyCache {
+    QemuCond cond;
+    QemuMutex mutex;
+    QemuThread thread;
+    bool exit;
+    uint16_t scsi_target_nums;
+} MPT3SASTopologyCache;
 
 struct MPT3SASState {
     PCIDevice dev;
@@ -142,7 +149,7 @@ struct MPT3SASState {
 
     uint8_t ioc_reset;
     uint32_t host_diag;
-    
+
     uint32_t hcb_size;
 
     // Request queues
@@ -180,6 +187,7 @@ struct MPT3SASState {
     uint64_t completed_commands;
 
     MPT3SASEventQueue *event_queue;
+    MPT3SASTopologyCache *topology_cache;
 
     SCSIBus bus;
     QTAILQ_HEAD(, MPT3SASRequest) pending;
