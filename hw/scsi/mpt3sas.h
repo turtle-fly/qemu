@@ -110,7 +110,8 @@ typedef struct MPT3SASTopologyCache {
     QemuMutex mutex;
     QemuThread thread;
     bool exit;
-    uint16_t scsi_target_nums;
+    int scsi_target_nums;
+    SCSIDevice *cached_devices;
 } MPT3SASTopologyCache;
 
 struct MPT3SASState {

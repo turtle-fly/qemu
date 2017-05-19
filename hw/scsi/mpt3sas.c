@@ -143,7 +143,7 @@ static int mpt3sas_get_scsi_drive_num(MPT3SASState *s)
 {
     int n = 0;
     while (scsi_device_find(&s->bus, 0, n++, 0) != NULL);
-    return n;
+    return n-1;
 }
 
 static void mpt3sas_free_request(MPT3SASRequest *req)
@@ -3052,6 +3052,49 @@ static uint32_t mpt3sas_config_read(PCIDevice *pci_dev, uint32_t address, int le
     return val;
 }
 
+static void mpt3sas_hotplug(MPT3SASState *s, SCSIDevice *d, int phy_id) {
+    uint32_t event_data_length = 0;
+
+    // 1. notify driver sas discovery start
+    MPT3SASEventData *event_data1 = NULL;
+    event_data1 = g_malloc0(sizeof(MPT3SASEventData) + sizeof(MPI2_EVENT_DATA_SAS_DISCOVERY));
+    event_data1->length = sizeof(MPI2_EVENT_DATA_SAS_DISCOVERY);
+    pMpi2EventDataSasDiscovery_t sas_discovery_data = (pMpi2EventDataSasDiscovery_t)event_data1->data;
+    sas_discovery_data->ReasonCode = MPI2_EVENT_SAS_DISC_RC_STARTED;
+    mpt3sas_event_enqueue(s, MPI2_EVENT_SAS_DISCOVERY, event_data1);
+
+    // 2. notify driver sas topology change for all newly added device
+    MPT3SASEventData *event_data2 = NULL;
+    pMpi2EventDataSasTopologyChangeList_t sas_topology_change_list = NULL;
+    event_data_length = offsetof(Mpi2EventDataSasTopologyChangeList_t, PHY) + sizeof(MPI2_EVENT_SAS_TOPO_PHY_ENTRY) * 1;
+    event_data2 = g_malloc0(sizeof(MPT3SASEventData) + event_data_length);
+    event_data2->length = event_data_length;
+    sas_topology_change_list = (pMpi2EventDataSasTopologyChangeList_t)event_data2->data;
+    //FIXME: hard code attributes
+    sas_topology_change_list->EnclosureHandle = 0x2;
+    sas_topology_change_list->ExpanderDevHandle = MPT3SAS_EXPANDER_HANDLE_START;
+    sas_topology_change_list->NumPhys = MPT3SAS_EXPANDER_NUM_PHYS;
+    sas_topology_change_list->NumEntries = 1;
+    sas_topology_change_list->StartPhyNum = phy_id;
+    sas_topology_change_list->ExpStatus = MPI2_EVENT_SAS_TOPO_ES_ADDED;
+    sas_topology_change_list->PhysicalPort = 0x0;
+    sas_topology_change_list->PHY[0].AttachedDevHandle = cpu_to_le16(MPT3SAS_ATTACHED_DEV_HANDLE_START + phy_id);
+    sas_topology_change_list->PHY[0].LinkRate = MPI25_EVENT_SAS_TOPO_LR_RATE_12_0 << MPI2_EVENT_SAS_TOPO_LR_CURRENT_SHIFT;
+    sas_topology_change_list->PHY[0].PhyStatus = MPI2_EVENT_SAS_TOPO_RC_TARG_ADDED;
+    mpt3sas_event_enqueue(s, MPI2_EVENT_SAS_TOPOLOGY_CHANGE_LIST, event_data2);
+
+    // 3. notify driver sas discovery completed
+    MPT3SASEventData *event_data3 = NULL;
+    event_data3 = g_malloc0(sizeof(MPT3SASEventData) + sizeof(MPI2_EVENT_DATA_SAS_DISCOVERY));
+    event_data3->length = sizeof(MPI2_EVENT_DATA_SAS_DISCOVERY);
+    sas_discovery_data = (pMpi2EventDataSasDiscovery_t)event_data3->data;
+    sas_discovery_data->ReasonCode = MPI2_EVENT_SAS_DISC_RC_COMPLETED;
+    mpt3sas_event_enqueue(s, MPI2_EVENT_SAS_DISCOVERY, event_data3);
+}
+
+//static void mpt3sas_hotunplug(MPT3SASState *s, SCSIDevice *d) {
+//}
+
 static int mpt3sas_topology_cache_thread_loop(MPT3SASState *s)
 {
     MPT3SASTopologyCache *topo = s->topology_cache;
@@ -3060,11 +3103,52 @@ static int mpt3sas_topology_cache_thread_loop(MPT3SASState *s)
         return -1;
     }
 
-    uint16_t scsi_target_nums = mpt3sas_get_scsi_drive_num(s);
-    if (scsi_target_nums != topo->scsi_target_nums) {
-        topo->scsi_target_nums = scsi_target_nums;
-        mpt3sas_add_events(s);
+    qemu_mutex_lock(&topo->mutex);
+
+    // scan all devices
+    int scsi_target_nums = mpt3sas_get_scsi_drive_num(s);
+    SCSIDevice *newly_scaned_devices = g_new0(SCSIDevice, scsi_target_nums);
+    int i, j;
+    SCSIDevice *curr_device = NULL;
+    for (i = 0; i < scsi_target_nums; i++) {
+        curr_device = scsi_device_find(&s->bus, 0, i, 0);
+        if (curr_device != NULL) {
+            g_memmove(newly_scaned_devices + i, curr_device, sizeof(SCSIDevice));
+        }
+        else {
+            fprintf(stderr, "Error in scan SCSI devices.\n");
+        }
     }
+
+    // for all newly added devices
+    uint64_t curr_wwn;
+    bool found;
+    for (i = 0; i < scsi_target_nums; i++) {
+        found = false;
+        curr_wwn = (newly_scaned_devices + i)->wwn;
+        for (j = 0; j < topo->scsi_target_nums; j++) {
+            if (curr_wwn == (topo->cached_devices + j)->wwn) {
+                found = true;
+                break;
+            }
+        }
+
+        if (!found) {
+            mpt3sas_hotplug(s, newly_scaned_devices + i, i);
+        }
+    }
+
+    // for all removed devices
+    //for (i = 0; i < topo->scsi_target_nums; i++) {
+
+    //}
+
+    // update cached devices
+    g_free(s->topology_cache->cached_devices);
+    s->topology_cache->cached_devices = newly_scaned_devices;
+    s->topology_cache->scsi_target_nums = scsi_target_nums;
+
+    qemu_mutex_unlock(&topo->mutex);
 
     return 0;
 }
@@ -3073,6 +3157,8 @@ static void mpt3sas_topology_cache_clear(MPT3SASState *s)
 {
     qemu_cond_destroy(&s->topology_cache->cond);
     qemu_mutex_destroy(&s->topology_cache->mutex);
+    g_free(s->topology_cache->cached_devices);
+    s->topology_cache->cached_devices = NULL;
     g_free(s->topology_cache);
     s->topology_cache = NULL;
 };
