@@ -690,8 +690,11 @@ static uint16_t mpt3sas_get_sas_expander_handle(MPT3SASState *s, int page_addres
     switch (form) {
         case MPI2_SAS_EXPAND_PGAD_FORM_GET_NEXT_HNDL:
             dev_handle = page_address & MPI2_SAS_EXPAND_PGAD_HANDLE_MASK;
-            if (dev_handle == 0xFFFF) {
+            dev_handle++;
+            if (dev_handle == 0x0) {
                 return MPT3SAS_EXPANDER_HANDLE_START;
+            } else if (dev_handle > MPT3SAS_EXPANDER_HANDLE_START) {
+                return 0xffff;
             }
             break;
         case MPI2_SAS_EXPAND_PGAD_FORM_HNDL:
@@ -886,11 +889,17 @@ static size_t mpt3sas_config_sas_phy_1(MPT3SASState *s, uint8_t **data, int addr
 static size_t mpt3sas_config_sas_expander_0(MPT3SASState *s, uint8_t **data, int address)
 {
     Mpi2ExpanderPage0_t exp_pg0;
-    //uint16_t dev_handle = 0;
+    uint16_t dev_handle = 0;
 
-    //dev_handle = mpt3sas_get_sas_expander_handle(s, address);
+    if (!data)
+        return sizeof(exp_pg0);
+
+    dev_handle = mpt3sas_get_sas_expander_handle(s, address);
+    trace_mpt3sas_config_sas_exp_pg0_data_address(dev_handle, address);
     memset(&exp_pg0, 0, sizeof(exp_pg0));
 
+    if (dev_handle == 0xffff)
+        return -1;
     //if (dev_handle != MPT3SAS_EXPANDER_HANDLE_START)
     //    return -1;
 
@@ -919,12 +928,16 @@ static size_t mpt3sas_config_sas_expander_0(MPT3SASState *s, uint8_t **data, int
 static size_t mpt3sas_config_sas_expander_1(MPT3SASState *s, uint8_t **data, int address)
 {
     Mpi2ExpanderPage1_t exp_pg1;
-    uint8_t phy_id = mpt3sas_get_sas_expander_handle(s, address);
+    uint8_t phy_id = 0;
     //int scsi_target_nums = mpt3sas_get_scsi_drive_num(s);
     uint16_t dev_handle = 0;
 
+    if (!data)
+        return sizeof(exp_pg1);
     //if (phy_id > MPT3SAS_EXPANDER_NUM_PHYS)
     //    return -1;
+
+    phy_id = mpt3sas_get_sas_expander_handle(s, address);
 
     memset(&exp_pg1, 0, sizeof(exp_pg1));
     exp_pg1.Header.PageVersion = MPI2_SASEXPANDER1_PAGEVERSION;
@@ -1359,6 +1372,26 @@ static void mpt3sas_event_sas_discovery(MPT3SASState *s, void *data)
     g_free(reply);
 }
 
+static void mpt3sas_event_sas_device_status_change(MPT3SASState *s, void *data)
+{
+    Mpi2EventDataSasDeviceStatusChange_t *dsd = NULL;
+    uint32_t event_data_length = 0;
+    Mpi2EventNotificationReply_t *reply = NULL;
+
+    dsd = (Mpi2EventDataSasDeviceStatusChange_t *)((MPT3SASEventData *)data)->data;
+    event_data_length = ((MPT3SASEventData *)data)->length;
+
+    reply = g_malloc0(sizeof(Mpi2EventNotificationReply_t) + event_data_length);
+    reply->EventDataLength = cpu_to_le16(event_data_length / 4);
+    reply->MsgLength = (sizeof(Mpi2EventNotificationReply_t) + event_data_length) / 4;
+    reply->Function = MPI2_FUNCTION_EVENT_NOTIFICATION;
+    reply->AckRequired = 1;
+    reply->Event = cpu_to_le16(MPI2_EVENT_SAS_DEVICE_STATUS_CHANGE);
+    memcpy(reply->EventData, dsd, event_data_length);
+    mpt3sas_post_reply(s, 0, 0, (MPI2DefaultReply_t *)reply);
+    g_free(reply);
+}
+
 /*
  * Send event to host
  */
@@ -1380,6 +1413,10 @@ static int mpt3sas_trigger_event(MPT3SASState *s, uint8_t et, void *data)
         {
             mpt3sas_event_sas_enclosure_device_status_change(s, data);
             return 0;
+        }
+        case MPI2_EVENT_SAS_DEVICE_STATUS_CHANGE:
+        {
+            mpt3sas_event_sas_device_status_change(s, data);
         }
         default:
             trace_mpt3sas_unhandled_event(et);
@@ -2227,6 +2264,30 @@ static void mpt3sas_handle_smp_passthrough(MPT3SASState *s, uint16_t smid, uint8
     mpt3sas_post_reply(s, smid, msix_index, (MPI2DefaultReply_t *)&reply);
 }
 
+static void mpt3sas_handle_sas_io_unit_control(MPT3SASState *s, uint16_t smid, uint8_t msix_index, Mpi2SasIoUnitControlRequest_t *req)
+{
+    Mpi2SasIoUnitControlReply_t reply;
+
+    trace_mpt3sas_handle_sas_io_unit_control(req->Operation, req->Function, req->DevHandle, req->PhyNum, req->LookupMethod, req->LookupAddress);
+
+    if (req->Operation == MPI2_SAS_OP_LOOKUP_MAPPING) {
+        //TODO: lookup dev handle and fill it to reply
+        return;
+    }
+
+    memset(&reply, 0, sizeof(reply));
+    reply.Operation = req->Operation;
+    reply.MsgLength = sizeof(reply) / 4;
+    reply.Function = req->Function;
+    reply.IOCParameter = req->IOCParameter;
+    reply.MsgFlags = req->MsgFlags;
+    reply.VP_ID = req->VP_ID;
+    reply.VF_ID = req->VF_ID;
+    reply.IOCStatus = MPI2_IOCSTATUS_SUCCESS;
+
+    mpt3sas_post_reply(s, smid, msix_index, (MPI2DefaultReply_t *)&reply);
+}
+
 /*
  * Handle doorbell message. Bascially IOCInit, IOCFacts, and PortFacts will be transfered
  * through doorbell register, but later, when all the queue are setup by host driver, the host
@@ -2561,6 +2622,9 @@ static void mpt3sas_handle_request(MPT3SASState *s)
             break;
         case MPI2_FUNCTION_SMP_PASSTHROUGH:
             mpt3sas_handle_smp_passthrough(s, smid, msix_index, (Mpi2SmpPassthroughRequest_t *)req);
+            break;
+        case MPI2_FUNCTION_SAS_IO_UNIT_CONTROL:
+            mpt3sas_handle_sas_io_unit_control(s, smid, msix_index, (Mpi2SasIoUnitControlRequest_t *)req);
             break;
         default:
             mpt3sas_handle_message(s, smid, msix_index, (MPI2RequestHeader_t *)req);
@@ -3052,7 +3116,8 @@ static uint32_t mpt3sas_config_read(PCIDevice *pci_dev, uint32_t address, int le
     return val;
 }
 
-static void mpt3sas_hotplug(MPT3SASState *s, SCSIDevice *d, int phy_id) {
+static void mpt3sas_hotplug(MPT3SASState *s, SCSIDevice *d, int phy_id)
+{
     uint32_t event_data_length = 0;
 
     // 1. notify driver sas discovery start
@@ -3092,8 +3157,70 @@ static void mpt3sas_hotplug(MPT3SASState *s, SCSIDevice *d, int phy_id) {
     mpt3sas_event_enqueue(s, MPI2_EVENT_SAS_DISCOVERY, event_data3);
 }
 
-//static void mpt3sas_hotunplug(MPT3SASState *s, SCSIDevice *d) {
-//}
+static void mpt3sas_hotunplug(MPT3SASState *s, SCSIDevice *d, int phy_id)
+{
+    uint32_t event_data_length = 0;
+
+    // 1. notify driver sas discovery start
+    MPT3SASEventData *event_data1 = NULL;
+    event_data1 = g_malloc0(sizeof(MPT3SASEventData) + sizeof(MPI2_EVENT_DATA_SAS_DISCOVERY));
+    event_data1->length = sizeof(MPI2_EVENT_DATA_SAS_DISCOVERY);
+    pMpi2EventDataSasDiscovery_t sas_discovery_data = (pMpi2EventDataSasDiscovery_t)event_data1->data;
+    sas_discovery_data->ReasonCode = MPI2_EVENT_SAS_DISC_RC_STARTED;
+    mpt3sas_event_enqueue(s, MPI2_EVENT_SAS_DISCOVERY, event_data1);
+
+    // 2. notify driver device status change (internel device reset)
+    MPT3SASEventData *event_data2 = NULL;
+    event_data2 = g_malloc0(sizeof(MPT3SASEventData) + sizeof(MPI2_EVENT_DATA_SAS_DEVICE_STATUS_CHANGE));
+    event_data2->length = sizeof(MPI2_EVENT_DATA_SAS_DEVICE_STATUS_CHANGE);
+    pMpi2EventDataSasDeviceStatusChange_t sas_dev_stat_change_data = (pMpi2EventDataSasDeviceStatusChange_t)event_data2->data;
+    sas_dev_stat_change_data->TaskTag = 0xFFFF;
+    sas_dev_stat_change_data->ReasonCode = MPI2_EVENT_SAS_DEV_STAT_RC_INTERNAL_DEVICE_RESET;
+    sas_dev_stat_change_data->PhysicalPort = 0x0;
+    sas_dev_stat_change_data->DevHandle = cpu_to_le16(MPT3SAS_ATTACHED_DEV_HANDLE_START + phy_id);
+    sas_dev_stat_change_data->SASAddress = s->sas_address;
+    memset(sas_dev_stat_change_data->LUN, 0xFF, sizeof(U8) * 8);
+    mpt3sas_event_enqueue(s, MPI2_EVENT_SAS_DEVICE_STATUS_CHANGE, event_data2);
+
+    // 3. notify driver sas topology change for all newly added device
+    MPT3SASEventData *event_data3 = NULL;
+    pMpi2EventDataSasTopologyChangeList_t sas_topology_change_list = NULL;
+    event_data_length = offsetof(Mpi2EventDataSasTopologyChangeList_t, PHY) + sizeof(MPI2_EVENT_SAS_TOPO_PHY_ENTRY) * 1;
+    event_data3 = g_malloc0(sizeof(MPT3SASEventData) + event_data_length);
+    event_data3->length = event_data_length;
+    sas_topology_change_list = (pMpi2EventDataSasTopologyChangeList_t)event_data3->data;
+    //FIXME: hard code attributes_HANDLE_START;
+    sas_topology_change_list->NumPhys = MPT3SAS_EXPANDER_NUM_PHYS;
+    sas_topology_change_list->NumEntries = 1;
+    sas_topology_change_list->StartPhyNum = phy_id;
+    sas_topology_change_list->ExpStatus = MPI2_EVENT_SAS_TOPO_ES_RESPONDING;
+    sas_topology_change_list->PhysicalPort = 0x0;
+    sas_topology_change_list->PHY[0].AttachedDevHandle = cpu_to_le16(MPT3SAS_ATTACHED_DEV_HANDLE_START + phy_id);
+    sas_topology_change_list->PHY[0].LinkRate = MPI2_EVENT_SAS_TOPO_LR_UNKNOWN_LINK_RATE << MPI2_EVENT_SAS_TOPO_LR_CURRENT_SHIFT;
+    sas_topology_change_list->PHY[0].PhyStatus = MPI2_EVENT_SAS_TOPO_RC_TARG_NOT_RESPONDING;
+    mpt3sas_event_enqueue(s, MPI2_EVENT_SAS_TOPOLOGY_CHANGE_LIST, event_data3);
+
+    // 4. notify driver device status change (internel device reset complete)
+    MPT3SASEventData *event_data4 = NULL;
+    event_data4 = g_malloc0(sizeof(MPT3SASEventData) + sizeof(MPI2_EVENT_DATA_SAS_DEVICE_STATUS_CHANGE));
+    event_data4->length = sizeof(MPI2_EVENT_DATA_SAS_DEVICE_STATUS_CHANGE);
+    pMpi2EventDataSasDeviceStatusChange_t sas_dev_stat_change_data2 = (pMpi2EventDataSasDeviceStatusChange_t)event_data4->data;
+    sas_dev_stat_change_data2->TaskTag = 0xFFFF;
+    sas_dev_stat_change_data2->ReasonCode = MPI2_EVENT_SAS_DEV_STAT_RC_CMP_INTERNAL_DEV_RESET;
+    sas_dev_stat_change_data2->PhysicalPort = 0x0;
+    sas_dev_stat_change_data2->DevHandle = cpu_to_le16(MPT3SAS_ATTACHED_DEV_HANDLE_START + phy_id);
+    sas_dev_stat_change_data2->SASAddress = s->sas_address;
+    memset(sas_dev_stat_change_data2->LUN, 0xFF, sizeof(U8) * 8);
+    mpt3sas_event_enqueue(s, MPI2_EVENT_SAS_DEVICE_STATUS_CHANGE, event_data4);
+
+    // 5. notify driver sas discovery completed
+    MPT3SASEventData *event_data5 = NULL;
+    event_data5 = g_malloc0(sizeof(MPT3SASEventData) + sizeof(MPI2_EVENT_DATA_SAS_DISCOVERY));
+    event_data5->length = sizeof(MPI2_EVENT_DATA_SAS_DISCOVERY);
+    sas_discovery_data = (pMpi2EventDataSasDiscovery_t)event_data5->data;
+    sas_discovery_data->ReasonCode = MPI2_EVENT_SAS_DISC_RC_COMPLETED;
+    mpt3sas_event_enqueue(s, MPI2_EVENT_SAS_DISCOVERY, event_data5);
+}
 
 static int mpt3sas_topology_cache_thread_loop(MPT3SASState *s)
 {
@@ -3134,14 +3261,31 @@ static int mpt3sas_topology_cache_thread_loop(MPT3SASState *s)
         }
 
         if (!found) {
+            printf("newly added device wwn is %lx\n", curr_wwn);
+            //FIXME: what's the exactly phy_id here?
+            printf("newly added device is at phy: %d\n", i);
             mpt3sas_hotplug(s, newly_scaned_devices + i, i);
         }
     }
 
     // for all removed devices
-    //for (i = 0; i < topo->scsi_target_nums; i++) {
+    for (j = 0; j < topo->scsi_target_nums; j++) {
+        found = false;
+        curr_wwn = (topo->cached_devices + j)->wwn;
+        for (i = 0; i < scsi_target_nums; i++) {
+            if (curr_wwn == (newly_scaned_devices + i)->wwn) {
+                found = true;
+                break;
+            }
+        }
 
-    //}
+        if (!found) {
+            printf("newly removed wwn is %lx\n", curr_wwn);
+            //FIXME: what's the exactly phy_id here?
+            printf("newly removed device is at phy: %d\n", j);
+            mpt3sas_hotunplug(s, topo->cached_devices + j, j);
+        }
+    }
 
     // update cached devices
     g_free(s->topology_cache->cached_devices);
