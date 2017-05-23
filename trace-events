@@ -876,6 +876,8 @@ mpt3sas_query_scsi_target_info(uint16_t device_handle, uint8_t phy, uint64_t add
 mpt3sas_scsi_io_overrun(uint64_t wwn, uint32_t control, uint32_t data_len, uint32_t xfer, uint32_t mode) "scsi device 0x%lx scsi request control 0x%x data length 0x%x qemu scsi command xfer 0x%x mode 0x%x"
 mpt3sas_dump_buffer(const char *buf) "%s"
 mpt3sas_config_sas_exp_pg0_data_address(uint16_t dev_handle, int address) "get dev handle: %#x from page address: %#x"
+mpt3sas_hotplug(uint64_t dev, int phy) "hotplug on wwn %#lx phy %#x"
+mpt3sas_hotunplug(uint64_t dev, int phy) "hotunplug from wwn %#lx phy %#x"
 
 # hw/audio/milkymist-ac97.c
 milkymist_ac97_memory_read(uint32_t addr, uint32_t value) "addr %08x value %08x"

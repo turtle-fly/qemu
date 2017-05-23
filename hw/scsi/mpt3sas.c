@@ -3119,6 +3119,7 @@ static uint32_t mpt3sas_config_read(PCIDevice *pci_dev, uint32_t address, int le
 static void mpt3sas_hotplug(MPT3SASState *s, SCSIDevice *d, int phy_id)
 {
     uint32_t event_data_length = 0;
+    trace_mpt3sas_hotplug(d->wwn, phy_id);
 
     // 1. notify driver sas discovery start
     MPT3SASEventData *event_data1 = NULL;
@@ -3160,6 +3161,8 @@ static void mpt3sas_hotplug(MPT3SASState *s, SCSIDevice *d, int phy_id)
 static void mpt3sas_hotunplug(MPT3SASState *s, SCSIDevice *d, int phy_id)
 {
     uint32_t event_data_length = 0;
+
+    trace_mpt3sas_hotunplug(d->wwn, phy_id);
 
     // 1. notify driver sas discovery start
     MPT3SASEventData *event_data1 = NULL;
@@ -3261,9 +3264,7 @@ static int mpt3sas_topology_cache_thread_loop(MPT3SASState *s)
         }
 
         if (!found) {
-            printf("newly added device wwn is %lx\n", curr_wwn);
             //FIXME: what's the exactly phy_id here?
-            printf("newly added device is at phy: %d\n", i);
             mpt3sas_hotplug(s, newly_scaned_devices + i, i);
         }
     }
@@ -3280,9 +3281,7 @@ static int mpt3sas_topology_cache_thread_loop(MPT3SASState *s)
         }
 
         if (!found) {
-            printf("newly removed wwn is %lx\n", curr_wwn);
             //FIXME: what's the exactly phy_id here?
-            printf("newly removed device is at phy: %d\n", j);
             mpt3sas_hotunplug(s, topo->cached_devices + j, j);
         }
     }
